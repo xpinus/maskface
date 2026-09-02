@@ -8,6 +8,7 @@ dependencies = [
     "moviepy>=2.2.1",
     "numpy>=2.4.6",
     "opencv-python>=4.10,<5",
+    "sv-ttk>=2.6.1",
     "tqdm>=4.70.0",
 ]
 

@@ -7,7 +7,7 @@
 
 import numpy as np
 import librosa
-from moviepy import AudioClip, AudioFileClip, VideoFileClip
+from moviepy import AudioClip, VideoFileClip
 
 
 def extract_audio(clip: VideoFileClip) -> tuple[np.ndarray, int] | None:
@@ -67,18 +67,27 @@ def make_audio_clip(
     将 numpy 音频数据封装为 moviepy AudioClip。
 
     Args:
-        audio_data: 音频采样数据 (float32)
+        audio_data: 音频采样数据 (float32), 1D 单声道
         sample_rate: 采样率
 
     Returns:
         moviepy AudioClip 对象
     """
-    # 将 float32 范围 [-1, 1] 转为 int16 范围
-    audio_int16 = (audio_data * 32767).astype(np.int16)
-    audio_clip = AudioFileClip(
-        audio_data, fps=sample_rate
-    )
-    return audio_clip
+    n_samples = len(audio_data)
+
+    def make_frame(t):
+        if isinstance(t, np.ndarray):
+            # MoviePy 批量请求时 t 是数组
+            idx = (t * sample_rate).astype(int)
+            idx = np.clip(idx, 0, n_samples - 1)
+            return audio_data[idx].reshape(1, -1)
+        else:
+            i = int(t * sample_rate)
+            if i < n_samples:
+                return np.array([float(audio_data[i])])
+            return np.array([0.0])
+
+    return AudioClip(make_frame, duration=n_samples / sample_rate, fps=sample_rate)
 
 
 def process_audio(clip: VideoFileClip, n_steps: float) -> AudioClip | None:

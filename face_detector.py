@@ -1,43 +1,50 @@
 """
 人脸检测与高斯模糊模块。
 
-使用 OpenCV DNN SSD 模型检测视频帧中的人脸，并应用高斯模糊。
-支持跳帧检测 + 线性插值以优化性能。
+使用 YuNet + Caffe SSD 双模型检测视频帧中的人脸，并应用高斯模糊。
+YuNet 为主检测器（侧脸/仰角强），Caffe SSD 为回退。
 
 模型路径：
   - PyInstaller 打包模式：从 sys._MEIPASS/models/ 读取
-  - 开发模式：从 ~/.video_anonymizer/ 读取
+  - 开发模式：从 ~/.video_anonymizer/ 读取，回退到项目 models/
 """
 
 import sys
 import cv2
 import numpy as np
 from pathlib import Path
+import threading
 
 # ---- 模型路径 ----
 
 def _get_model_dir() -> Path:
     """获取模型文件目录，兼容打包和开发模式。"""
     if getattr(sys, 'frozen', False):
-        # PyInstaller 打包模式
         return Path(sys._MEIPASS) / "models"
     else:
-        # 开发模式
         return Path.home() / ".video_anonymizer"
 
 MODEL_DIR = _get_model_dir()
+_PROJECT_MODELS = Path(__file__).resolve().parent / "models"
 
+# Caffe SSD
 PROTOTXT_PATH = MODEL_DIR / "deploy.prototxt"
 CAFFEMODEL_PATH = MODEL_DIR / "res10_300x300_ssd_iter_140000_fp16.caffemodel"
 
-_net = None
+# YuNet
+YUNET_PATH = MODEL_DIR / "face_detection_yunet_2023mar.onnx"
+_PROJECT_YUNET = _PROJECT_MODELS / "face_detection_yunet_2023mar.onnx"
+
+# ---- 线程局部模型 ----
+
+_local = threading.local()
 
 
-def _ensure_model() -> None:
-    """加载模型文件。不存在时给出清晰错误提示。"""
-    global _net
-    if _net is not None:
-        return
+def _get_net():
+    """获取线程局部的 Caffe DNN 网络实例。"""
+    net = getattr(_local, 'net', None)
+    if net is not None:
+        return net
 
     if not PROTOTXT_PATH.exists():
         raise FileNotFoundError(
@@ -50,30 +57,63 @@ def _ensure_model() -> None:
             "请确保模型文件已放置在正确位置。"
         )
 
-    _net = cv2.dnn.readNetFromCaffe(str(PROTOTXT_PATH), str(CAFFEMODEL_PATH))
+    _local.net = cv2.dnn.readNetFromCaffe(str(PROTOTXT_PATH), str(CAFFEMODEL_PATH))
+    return _local.net
+
+
+def _get_yunet_detector():
+    """获取线程局部的 YuNet 检测器实例。"""
+    detector = getattr(_local, 'yunet', None)
+    if detector is not None:
+        return detector
+
+    model_path = YUNET_PATH if YUNET_PATH.exists() else _PROJECT_YUNET
+    if not model_path.exists():
+        raise FileNotFoundError(
+            f"YuNet 模型文件未找到: {YUNET_PATH}\n"
+            "请确保模型文件已放置在正确位置。"
+        )
+
+    _local.yunet = cv2.FaceDetectorYN.create(
+        str(model_path), "", (320, 320), 0.5, 0.5, 5000
+    )
+    return _local.yunet
 
 
 # ---- 人脸检测 ----
 
-def detect_faces(
-    frame: np.ndarray, confidence_threshold: float = 0.5
+def _detect_yunet(
+    frame: np.ndarray, confidence_threshold: float
 ) -> list[tuple[int, int, int, int, float]]:
-    """
-    检测图像帧中的人脸。
+    """使用 YuNet 检测人脸，返回与 Caffe 一致的格式。"""
+    detector = _get_yunet_detector()
+    h, w = frame.shape[:2]
+    detector.setInputSize((w, h))
+    detector.setScoreThreshold(confidence_threshold)
+    _, results = detector.detect(frame)
 
-    Args:
-        frame: BGR 图像 (numpy array)
-        confidence_threshold: 置信度阈值 (0.0 ~ 1.0)
+    faces: list[tuple[int, int, int, int, float]] = []
+    if results is None:
+        return faces
 
-    Returns:
-        [(x, y, w, h, confidence), ...] 人脸边界框列表
-    """
-    _ensure_model()
+    # YuNet 输出格式: [x, y, w, h, ...landmarks, confidence]
+    for det in results:
+        x, y, fw, fh = int(det[0]), int(det[1]), int(det[2]), int(det[3])
+        conf = float(det[14])
+        faces.append((x, y, fw, fh, conf))
 
+    return faces
+
+
+def _detect_caffe(
+    frame: np.ndarray, confidence_threshold: float
+) -> list[tuple[int, int, int, int, float]]:
+    """使用 Caffe SSD 检测人脸。"""
+    net = _get_net()
     h, w = frame.shape[:2]
     blob = cv2.dnn.blobFromImage(frame, 1.0, (300, 300), (104.0, 177.0, 123.0))
-    _net.setInput(blob)
-    detections = _net.forward()
+    net.setInput(blob)
+    detections = net.forward()
 
     faces: list[tuple[int, int, int, int, float]] = []
     for i in range(detections.shape[2]):
@@ -84,6 +124,27 @@ def detect_faces(
         x1, y1, x2, y2 = box.astype("int")
         faces.append((x1, y1, x2 - x1, y2 - y1, confidence))
 
+    return faces
+
+
+def detect_faces(
+    frame: np.ndarray, confidence_threshold: float = 0.5
+) -> list[tuple[int, int, int, int, float]]:
+    """
+    检测图像帧中的人脸。
+
+    YuNet 优先（侧脸/仰角强），未检出时回退 Caffe SSD。
+
+    Args:
+        frame: BGR 图像 (numpy array)
+        confidence_threshold: 置信度阈值 (0.0 ~ 1.0)
+
+    Returns:
+        [(x, y, w, h, confidence), ...] 人脸边界框列表
+    """
+    faces = _detect_yunet(frame, confidence_threshold)
+    if not faces:
+        faces = _detect_caffe(frame, confidence_threshold)
     return faces
 
 
@@ -110,7 +171,6 @@ def apply_blur(
     h, w = frame.shape[:2]
 
     for (x, y, fw, fh, _) in faces:
-        # 边界裁剪
         x1 = max(0, x)
         y1 = max(0, y)
         x2 = min(w, x + fw)
@@ -119,7 +179,6 @@ def apply_blur(
         if x2 <= x1 or y2 <= y1:
             continue
 
-        # 扩张区域以包含更多周围像素，使模糊更自然
         pad = kernel_size // 2
         y1_pad = max(0, y1 - pad)
         y2_pad = min(h, y2 + pad)
@@ -131,52 +190,3 @@ def apply_blur(
         result[y1_pad:y2_pad, x1_pad:x2_pad] = blurred
 
     return result
-
-
-# ---- 跳帧 + 线性插值 ----
-
-class FaceTracker:
-    """跳帧检测 + 线性插值的人脸跟踪器。"""
-
-    def __init__(self, skip_interval: int = 5, confidence_threshold: float = 0.5):
-        self.skip_interval = skip_interval
-        self.confidence_threshold = confidence_threshold
-        self._last_faces: list[tuple[int, int, int, int, float]] = []
-        self._next_faces: list[tuple[int, int, int, int, float]] = []
-        self._frame_since_detect = skip_interval  # 触发首次检测
-
-    def process_frame(self, frame: np.ndarray) -> list[tuple[int, int, int, int, float]]:
-        """
-        处理一帧，返回插值后的人脸位置。
-
-        每 skip_interval 帧执行一次完整检测，
-        中间帧使用线性插值。
-        """
-        if self._frame_since_detect >= self.skip_interval:
-            self._last_faces = self._next_faces
-            self._next_faces = detect_faces(frame, self.confidence_threshold)
-            self._frame_since_detect = 0
-            return self._next_faces
-
-        self._frame_since_detect += 1
-
-        # 线性插值
-        if not self._last_faces or not self._next_faces:
-            return self._next_faces or self._last_faces
-
-        t = self._frame_since_detect / self.skip_interval
-        interpolated: list[tuple[int, int, int, int, float]] = []
-
-        # 按最近邻匹配两个人脸列表
-        for lf in self._last_faces:
-            best = min(
-                self._next_faces,
-                key=lambda nf: (lf[0] - nf[0]) ** 2 + (lf[1] - nf[1]) ** 2,
-            )
-            x = int(lf[0] + (best[0] - lf[0]) * t)
-            y = int(lf[1] + (best[1] - lf[1]) * t)
-            w = int(lf[2] + (best[2] - lf[2]) * t)
-            h = int(lf[3] + (best[3] - lf[3]) * t)
-            interpolated.append((x, y, w, h, best[4]))
-
-        return interpolated

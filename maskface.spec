@@ -4,9 +4,10 @@ from PyInstaller.utils.hooks import copy_metadata
 datas = [
     ('models/deploy.prototxt', 'models'),
     ('models/res10_300x300_ssd_iter_140000_fp16.caffemodel', 'models'),
-    (r'C:\Users\pinus\Downloads\面具2.png', '.'),
+    ('models/face_detection_yunet_2023mar.onnx', 'models'),
+    ('mask.png', '.'),
 ]
-for pkg in ['imageio', 'moviepy', 'librosa', 'numpy', 'scipy', 'tqdm', 'soundfile', 'numba', 'llvmlite', 'scikit-learn']:
+for pkg in ['imageio', 'moviepy', 'librosa', 'numpy', 'scipy', 'tqdm', 'soundfile', 'numba', 'llvmlite', 'scikit-learn', 'sv_ttk']:
     try:
         datas += copy_metadata(pkg)
     except Exception:
@@ -29,6 +30,7 @@ a = Analysis(
         'numpy',
         'tqdm',
         'PIL',
+        'sv_ttk',
     ],
     hookspath=[],
     hooksconfig={},
@@ -58,7 +60,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
+    icon=r'maskface.ico',
 )
 
 coll = COLLECT(

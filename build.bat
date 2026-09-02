@@ -1,63 +1,65 @@
 @echo off
-title MaskFace - 构建打包
+setlocal enabledelayedexpansion
+title MaskFace Build
 cd /d "%~dp0"
 
 echo ========================================
-echo   MaskFace - PyInstaller 打包构建 (onedir)
+echo   MaskFace - PyInstaller Build
 echo ========================================
-echo.
+echo/
 
-:: Step 1: 检查模型文件
-echo [1/4] 检查模型文件...
+echo [1/5] Checking models...
 if not exist "models\deploy.prototxt" (
-    echo   [错误] models\deploy.prototxt 未找到！
+    echo   [ERROR] models\deploy.prototxt not found!
     pause
     exit /b 1
 )
 if not exist "models\res10_300x300_ssd_iter_140000_fp16.caffemodel" (
-    echo   [错误] models\res10_300x300_ssd_iter_140000_fp16.caffemodel 未找到！
+    echo   [ERROR] models\res10_300x300_ssd_iter_140000_fp16.caffemodel not found!
     pause
     exit /b 1
 )
-echo   [OK] 模型文件已就绪
+echo   [OK] Models ready
 
-:: Step 2: 确保依赖已安装
-echo.
-echo [2/4] 检查依赖...
+echo/
+echo [2/5] Checking icon...
+if not exist "maskface.ico" (
+    echo   [WARN] maskface.ico not found, skipping...
+    echo   Run: .venv\Scripts\python.exe -c "from PIL import Image; img=Image.open(r'mask.png'); img.save('maskface.ico',format='ICO',sizes=[(256,256),(48,48),(32,32),(16,16)])"
+)
+echo   [OK] Icon check done
+
+echo/
+echo [3/5] Cleaning old build...
+taskkill /f /im MaskFace.exe >nul 2>&1
+timeout /t 2 /nobreak >nul
+if exist "dist\MaskFace\" rmdir /s /q "dist\MaskFace"
+if exist "build\maskface\" rmdir /s /q "build\maskface"
+echo   [OK] Clean done
+
+echo/
+echo [4/5] Installing dependencies...
 uv sync
-if %ERRORLEVEL% neq 0 (
-    echo   [错误] 依赖安装失败！
+if !errorlevel! neq 0 (
+    echo   [ERROR] Dependency install failed!
     pause
     exit /b 1
 )
-echo   [OK] 依赖已就绪
+echo   [OK] Dependencies ready
 
-:: Step 3: 执行 PyInstaller 打包
-echo.
-echo [3/4] 执行 PyInstaller 打包...
-echo   这可能需要几分钟，请耐心等待...
-
-uv run pyinstaller maskface.spec --clean --noconfirm
-
-if %ERRORLEVEL% neq 0 (
-    echo   [错误] 打包失败！
+echo/
+echo [5/5] Running PyInstaller...
+".venv\Scripts\python.exe" -m PyInstaller maskface.spec --noconfirm
+if !errorlevel! neq 0 (
+    echo/
+    echo   [ERROR] Build failed! Check output above.
     pause
     exit /b 1
 )
 
-:: Step 4: 打包为 zip
-echo.
-echo [4/4] 打包为 zip...
-if exist "dist\MaskFace" (
-    powershell -Command "Compress-Archive -Path 'dist\MaskFace' -DestinationPath 'dist\MaskFace.zip' -Force"
-    echo   [OK] dist\MaskFace.zip 已生成
-)
-
-echo.
+echo/
 echo ========================================
-echo   构建完成！
-echo   输出: dist\MaskFace\  (文件夹)
-echo   压缩包: dist\MaskFace.zip
+echo   SUCCESS! Output: dist\MaskFace\MaskFace.exe
 echo ========================================
-echo.
+echo/
 pause
